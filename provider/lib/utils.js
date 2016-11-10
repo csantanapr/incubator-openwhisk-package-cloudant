@@ -1,6 +1,6 @@
 var _ = require('lodash');
 var request = require('request');
-var RequestAgent = require('agentkeepalive');
+var constants = require('./constants.js');
 
 module.exports = function(
   tid,
@@ -8,7 +8,6 @@ module.exports = function(
   app,
   retriesBeforeDelete,
   triggerDB,
-  triggersFireLimit,
   routerHost
 ) {
 
@@ -17,8 +16,15 @@ module.exports = function(
     this.app = app;
     this.retriesBeforeDelete = retriesBeforeDelete;
     this.triggerDB = triggerDB;
-    this.triggersLimit = triggersFireLimit;
     this.routerHost = routerHost;
+
+    this.logger.info (tid, 'utils', 'recieved database to store triggers: ' + triggerDB);
+
+    // this is the default trigger fire limit (in the event that is was not set during trigger creation)
+    this.defaultTriggerFireLimit = constants.DEFAULT_TRIGGER_COUNT;
+
+    // maximum number of times to create a trigger
+    this.retryCount = constants.RETRIES_BEFORE_DELETE;
 
     // Log HTTP Requests
     app.use(function(req, res, next) {
@@ -31,16 +37,15 @@ module.exports = function(
     this.module = 'utils';
     this.triggers = {};
 
+    // we need a way of know if the triggers should fire without max fire constraint (ie fire infinite times)
+    this.unlimitedTriggerFires = false;
+
     var that = this;
 
     // Add a trigger: listen for changes and dispatch.
     this.createTrigger = function(dataTrigger, retryCount) {
 
       var method = 'createTrigger';
-
-      // The maxSockets determines how many concurrent sockets the agent can have open per
-      // host, is present in an agent by default with value ??.
-      var maximumDbConnections = 50;
 
       // Cleanup connection when trigger is deleted.
       var sinceToUse = dataTrigger.since ? dataTrigger.since : "now";
@@ -51,7 +56,6 @@ module.exports = function(
         dbProtocol = dataTrigger.protocol;
       }
 
-      // input["accounturl"] = "https://" + host;
       // unless specified host will default to accounturl without the https:// in front
       var dbHost;
       if (dataTrigger.host) {
@@ -60,10 +64,6 @@ module.exports = function(
     	  dbHost = dataTrigger.accounturl;
     	  dbHost = dbHost.replace('https://','');
       }
-
-      var connectionAgent = new RequestAgent({
-    	  maxSockets: maximumDbConnections
-      });
 
       // both couch and cloudant should have their URLs in the username:password@host format
       dbURL = dbProtocol + '://' + dataTrigger.user + ':' + dataTrigger.pass + '@' + dbHost;
@@ -87,12 +87,20 @@ module.exports = function(
 
           feed.on('change', function (change) {
               var triggerHandle = that.triggers[dataTrigger.id];
+
               logger.info(tid, method, 'Got change from', dataTrigger.dbname, change);
-              if(triggerHandle && triggerHandle.triggersLeft > 0 && triggerHandle.retriesLeft > 0) {
-                  try {
-                      that.invokeWhiskAction(dataTrigger.id, change);
-                  } catch (e) {
-                      logger.error(tid, method, 'Exception occurred in callback', e);
+              if (triggerHandle && triggerHandle.retriesLeft > 0) {
+                  if (triggerHandle.triggersLeft === -1) {
+                	  logger.info(tid, method, 'found a trigger fire limit set to -1.  setting it to fire infinately many times');
+                      that.unlimitedTriggerFires = true;
+                  }
+
+                  if(that.unlimitedTriggerFires || triggerHandle.triggersLeft > 0) {
+                      try {
+                          that.invokeWhiskAction(dataTrigger.id, change);
+                      } catch (e) {
+                          logger.error(tid, method, 'Exception occurred in callback', e);
+                      }
                   }
               }
           });
@@ -148,7 +156,7 @@ module.exports = function(
     this.initTrigger = function (obj, id) {
 
         logger.info(tid, 'initTrigger', obj);
-        var includeDoc = ((obj.includeDoc === true || obj.includeDoc.toString().trim().toLowerCase() === 'true')) || "false";
+        var includeDoc = ((obj.includeDoc === true || obj.includeDoc.toString().trim().toLowerCase() === 'true')) || 'false';
         var trigger = {
             id: id,
             accounturl: obj.accounturl,
@@ -180,9 +188,15 @@ module.exports = function(
             if(!err) {
                 body.rows.forEach(function(trigger) {
                     var cloudantTrigger = that.initTrigger(trigger.doc, trigger.doc.id);
-                    // check here for triggers left if none left end here, and dont create
-                    if (cloudantTrigger.triggersLeft > 0) {
-                      that.createTrigger(cloudantTrigger, 10);
+
+                    if (cloudantTrigger.triggersLeft === -1) {
+                  	    logger.info(tid, method, 'found a trigger fire limit set to -1.  setting it to fire infinately many times');
+                        that.unlimitedTriggerFires = true;
+                    }
+
+                    // check here for triggers left if none left end here, and don't create
+                    if (that.unlimitedTriggerFires || cloudantTrigger.triggersLeft > 0) {
+                      that.createTrigger(cloudantTrigger, that.retryCount);
                     } else {
                       logger.info(tid, method, 'found a trigger with no triggers left to fire off.');
                     }
@@ -272,8 +286,6 @@ module.exports = function(
         logger.info(tid, method, 'invokeWhiskAction: change =', change);
 
         var form = change.hasOwnProperty('doc') ? change.doc : change;
-        // always store changes
-        //var form = change;
 
         logger.info(tid, method, 'invokeWhiskAction: form =', form);
         logger.info(tid, method, 'for trigger', id, 'invoking action', triggerName, 'with db update', JSON.stringify(form));
@@ -283,7 +295,11 @@ module.exports = function(
         var auth = apikey.split(':');
         logger.info(tid, method, uri, auth, form);
 
-        dataTrigger.triggersLeft--;
+        // only manage trigger fires if they are not infinite
+        if (!that.unlimitedTriggerFires) {
+      	    logger.info(tid, method, 'found a trigger fire limit set to -1.  setting it to fire infinately many times');
+            dataTrigger.triggersLeft--;
+        }
 
         request({
             method: 'post',
@@ -299,7 +315,12 @@ module.exports = function(
                 logger.info(tid, method, 'done http request, body', body);
                 if(error || response.statusCode >= 400) {
                     dataTrigger.retriesLeft--;
-                    dataTrigger.triggersLeft++; // setting the counter back to where it used to be
+
+                    // only manage trigger fires if they are not infinite
+                    if (!that.unlimitedTriggerFires) {
+                    	dataTrigger.triggersLeft++; // setting the counter back to where it used to be
+                    }
+
                     logger.error(tid, method, 'there was an error invoking', id, response ? response.statusCode : response, error, body);
                 } else {
                     dataTrigger.retriesLeft = that.retriesBeforeDelete; // reset retry counter

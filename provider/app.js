@@ -8,7 +8,6 @@ var express = require('express');
 var request = require('request');
 var bodyParser = require('body-parser');
 var logger = require('./Logger');
-var RequestAgent = require('agentkeepalive');
 
 var ProviderUtils = require('./lib/utils.js');
 var ProviderHealth = require('./lib/health.js');
@@ -30,18 +29,9 @@ var tid = "??";
 // Whisk API Router Host
 var routerHost = process.env.ROUTER_HOST || 'localhost';
 
-// This is the maximum times a single trigger is allow to fire.
-// Trigger should not be allow to be created with a value higher than this value
-// Trigger can be created with a value lower than this between 1 and this value
-var triggerFireLimit = 10000;
-
 // Maximum number of times to retry the invocation of an action
 // before deleting the associated trigger
-var retriesBeforeDelete = 5;
-
-// The maxSockets determines how many concurrent sockets the agent can have open per
-// host, is present in an agent by default with value ??.
-var maximumDbConnections = 50;
+var retriesBeforeDelete = constants.RETRIES_BEFORE_DELETE;
 
 // Allow invoking servers with self-signed certificates.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -65,29 +55,27 @@ server.listen(app.get('port'), function(){
 
 function createDatabase (nanop) {
 
+  logger.info(tid, 'createDatabase', 'creating the trigger database');
   if (nanop !== null) {
     nanop.db.create(databaseName, function(err, body, header) {
         if (!err) {
           logger.info(tid, databaseName, ' database for triggers was created.');
         } else {
-          logger.info(tid, databaseName, err);
+          logger.info(tid, databaseName, 'failed to create the trigger database.  it might already exist ',err);
         }
     });
     var chDb = nanop.db.use(databaseName);
     return chDb;
   } else {
+    logger.info(tid, databaseName, 'failed to create the trigger database.  nano provider did not get created.  check db URL: ' + dbHost);
     return null;
   }
 
-}
+};
 
 function createTriggerDb () {
 
   var nanop = null;
-
-  var connectionAgent = new RequestAgent({
-    maxSockets: maximumDbConnections
-  });
 
   // no need for a promise here, but leaving code inplace until we prove out the question of cookie usage
   var promise = new Promise(function(resolve, reject) {
@@ -100,7 +88,7 @@ function createTriggerDb () {
 
   return promise;
 
-}
+};
 
 // Initialize the Provider Server
 function init(server) {
@@ -118,7 +106,7 @@ function init(server) {
 
       logger.info(tid, 'init', 'trigger storage database details: ', nanoDb);
 
-      var providerUtils = new ProviderUtils (tid, logger, app, retriesBeforeDelete, nanoDb, triggerFireLimit, routerHost);
+      var providerUtils = new ProviderUtils (tid, logger, app, retriesBeforeDelete, nanoDb, routerHost);
       var providerRAS = new ProviderRAS (tid, logger, providerUtils);
       var providerHealth = new ProviderHealth (tid, logger, providerUtils);
       var providerUpdate = new ProviderUpdate (tid, logger, providerUtils);
@@ -145,6 +133,6 @@ function init(server) {
       logger.info(tid, 'init', 'found an error creating database: ', err);
     });
 
-}
+};
 
 init(server);
