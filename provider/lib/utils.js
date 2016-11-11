@@ -79,8 +79,10 @@ module.exports = function(
       // no need for a promise here, but leaving code inplace until we prove out the question of cookie usage
       return new Promise(function(resolve, reject) {
           var triggeredDB = nanoConnection.use(dataTrigger.dbname);
+          
           // Listen for changes on this database.
-          var feed = triggeredDB.follow({since: sinceToUse, include_docs: dataTrigger.includeDoc});
+          // always set the include doc setting to false
+          var feed = triggeredDB.follow({since: sinceToUse, include_docs: false});
 
           dataTrigger.feed = feed;
           that.triggers[dataTrigger.id] = dataTrigger;
@@ -88,16 +90,25 @@ module.exports = function(
           feed.on('change', function (change) {
               var triggerHandle = that.triggers[dataTrigger.id];
 
-              logger.info(tid, method, 'Got change from', dataTrigger.dbname, change);
+              logger.info(tid, method, 'Got change from', dataTrigger.dbname, change, triggerHandle);
+              logger.info(tid, method, 'Found triggerHandle', triggerHandle);
+        	  
               if (triggerHandle && triggerHandle.retriesLeft > 0) {
+            	  
+            	  logger.info(tid, method, 'triggers left:', triggerHandle.triggersLeft);
+            	  logger.info(tid, method, 'retries left:', triggerHandle.retriesLeft);
+            	  
                   if (triggerHandle.triggersLeft === -1) {
                 	  logger.info(tid, method, 'found a trigger fire limit set to -1.  setting it to fire infinately many times');
                       that.unlimitedTriggerFires = true;
+                  } else {
+                	  that.unlimitedTriggerFires = false;
                   }
 
                   if(that.unlimitedTriggerFires || triggerHandle.triggersLeft > 0) {
                       try {
-                          that.invokeWhiskAction(dataTrigger.id, change);
+                    	  logger.info(tid, method, 'found a valid trigger.  lets fire this trigger', triggerHandle);
+                          that.fireTrigger(dataTrigger.id, change);
                       } catch (e) {
                           logger.error(tid, method, 'Exception occurred in callback', e);
                       }
@@ -115,7 +126,7 @@ module.exports = function(
 
           feed.on('error', function (err) {
               logger.error(tid, method,'Error occurred for trigger', dataTrigger.id, '(db ' + dataTrigger.dbname + '):', err);
-              // revive the feed if an error ocurred for now
+              // revive the feed if an error occured for now
               // the user should be in charge of removing the feeds
               logger.info(tid, "attempting to recreate trigger", dataTrigger.id);
               that.deleteTrigger(dataTrigger.id);
@@ -155,8 +166,34 @@ module.exports = function(
 
     this.initTrigger = function (obj, id) {
 
-        logger.info(tid, 'initTrigger', obj);
-        var includeDoc = ((obj.includeDoc === true || obj.includeDoc.toString().trim().toLowerCase() === 'true')) || 'false';
+        var method = 'initTrigger';
+
+        // validate parameters here
+        logger.info(tid, method, 'create has recieved the following request args', JSON.stringify(obj));
+
+        // if the trigger creation request has not set the max trigger fire limit
+        // we will set it here (default value can be updated in ./constants.js)
+        if (!obj.maxTriggers) {
+        	logger.info(tid, method, 'maximum trigger fires has not been set by requester.  setting it to the default value of infinity.');
+        	logger.info(tid, method, 'setting trigger fire limit', that.defaultTriggerFireLimit)
+        	obj.maxTriggers = that.defaultTriggerFireLimit;
+        } else {
+            logger.info(tid, method, 'maximum trigger fires has been set to:', obj.maxTriggers);
+        }
+
+        // if we find that includeDoc is set to true we should warn user here
+        // (note: this will only be the set for old feeds.  we no longer allow 
+        // this to be set for newly created feeds).
+        if (obj.includeDoc && (obj.includeDoc === true || obj.includeDoc.toString().trim().toLowerCase() === 'true')) {
+            logger.warn(tid, method, 'cloudant trigger feed: includeDoc parameter is no longer supported and will be ignored.');
+        }
+
+        // any new feeds will not contain the includeDocs parameter
+        var includeDoc;
+        if (obj.includeDoc) {
+            includeDoc = ((obj.includeDoc === true || obj.includeDoc.toString().trim().toLowerCase() === 'true')) || 'false';
+        }
+        
         var trigger = {
             id: id,
             accounturl: obj.accounturl,
@@ -192,6 +229,8 @@ module.exports = function(
                     if (cloudantTrigger.triggersLeft === -1) {
                   	    logger.info(tid, method, 'found a trigger fire limit set to -1.  setting it to fire infinately many times');
                         that.unlimitedTriggerFires = true;
+                    } else {
+                        that.unlimitedTriggerFires = false;
                     }
 
                     // check here for triggers left if none left end here, and don't create
@@ -276,18 +315,29 @@ module.exports = function(
 
     };
 
-    this.invokeWhiskAction = function (id, change) {
-        var method = 'invokeWhiskAction';
+    this.fireTrigger = function (id, change) {
+        var method = 'fireTrigger';
 
         var dataTrigger = that.triggers[id];
         var apikey = dataTrigger.apikey;
         var triggerName = dataTrigger.callback.action.name;
         var triggerObj = that.parseQName(triggerName);
-        logger.info(tid, method, 'invokeWhiskAction: change =', change);
+        logger.info(tid, method, 'fireTrigger: change =', change);
 
-        var form = change.hasOwnProperty('doc') ? change.doc : change;
+        var form = change;
+        // pass the fire trigger both the change and an object containing
+        // whisk related details
+        if (dataTrigger.includeDoc && dataTrigger.includeDoc === 'true') {
+            var whiskPayloadObject = {
+                'error' : {
+                    'code' : 1,
+                    'message' : 'includeDoc parameter is no longer supported.'
+                }
+            };
+            form.whisk = JSON.stringify(whiskPayloadObject);
+        }
 
-        logger.info(tid, method, 'invokeWhiskAction: form =', form);
+        logger.info(tid, method, 'fireTrigger: form =', form);
         logger.info(tid, method, 'for trigger', id, 'invoking action', triggerName, 'with db update', JSON.stringify(form));
 
         var host = 'https://'+routerHost+':'+443;
