@@ -10,18 +10,15 @@ function main(msg) {
     var trigger = msg.triggerName;
     var replaceNameTrigger = trigger.replace(/\//g, ":");
 
-    // if the cloudant feed has been submitted with includeDoc
-    // we should warn requester at this point that we do not support this
-    // parameter anymore
+    // we still should to look out for new feeds that might contain the includeDoc (eventhough we don't support it)
+    // so that we can send folks a meaning message about no longer supporting it.
     if (msg.includeDoc) {
-    	var eMsg = 'cloudant trigger feed: includeDoc parameter is no longer supported';
+    	var wMsg = 'cloudant trigger feed: includeDoc parameter is no longer supported';
     	console.log(
-            eMsg,
-            '[error:]',
-            whisk.error(eMsg)
+            wMsg
         );
     }
-    
+
     // configuration parameters
     var provider_endpoint = msg.package_endpoint;
     var dbname = msg.dbname;
@@ -30,6 +27,7 @@ function main(msg) {
     var host = msg.host;
     var protocol = msg.protocol || 'https';
     var port = msg.port;
+    var includeDoc = msg.includeDoc;
     var maxTriggers = msg.maxTriggers;
 
     if (lifecycleEvent === 'CREATE') {
@@ -45,6 +43,7 @@ function main(msg) {
         input["user"] = user;
         input["pass"] = pass;
         input["apikey"] = apiKey;
+        input["includeDoc"] = includeDoc;
         input["maxTriggers"] = maxTriggers;
         input["callback"] = {};
         input["callback"]["action"] = {};

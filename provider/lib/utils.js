@@ -188,7 +188,6 @@ module.exports = function(
             logger.warn(tid, method, 'cloudant trigger feed: includeDoc parameter is no longer supported and will be ignored.');
         }
 
-        // any new feeds will not contain the includeDocs parameter
         var includeDoc;
         if (obj.includeDoc) {
             includeDoc = ((obj.includeDoc === true || obj.includeDoc.toString().trim().toLowerCase() === 'true')) || 'false';
@@ -327,14 +326,14 @@ module.exports = function(
         var form = change;
         // pass the fire trigger both the change and an object containing
         // whisk related details
-        if (dataTrigger.includeDoc && dataTrigger.includeDoc === 'true') {
+        if (dataTrigger.includeDoc === true || dataTrigger.includeDoc === 'true') {
             var whiskPayloadObject = {
                 'error' : {
                     'code' : 1,
                     'message' : 'includeDoc parameter is no longer supported.'
                 }
             };
-            form.whisk = JSON.stringify(whiskPayloadObject);
+            form.whisk = whiskPayloadObject;
         }
 
         logger.info(tid, method, 'fireTrigger: form =', form);
